@@ -61,21 +61,42 @@ def block_condition_numbers(
         num_neighs = gb.node_neighbors(g, only_lower=True).size
 
         ind = assembler.dof_ind(g, var)
+        loc_A = A[ind][:, ind]
+        is_symmetric = np.max(np.abs((A - A.T).data)) < tol
         if ind.size == 1:
             # Condition number of a scalar is 1
             condition_numbers[block_ind] = 1
             continue
         elif ind.size < max(num_neighs + 2, 100):
             # For small problems, use dense singular value computation
-            _, ev, _ = np.linalg.eig((A[ind][:, ind]).toarray())
-            ev.sort()
+            if is_symmetric:
+                _, ev = np.linalg.eig(loc_A.toarray())
+            else:
+                _, ev, _ = np.linalg.svd(loc_A.toarray())
+                ev.sort()
             ev_max = ev
             ev_min = ev
         else:
             # Find largest and smallest singular values
-            ev_max, _ = spla.eigs(A[ind][:, ind], k=1)
-            # See comment above on the number estimated here
-            ev_min, _ = spla.eigs(A[ind][:, ind], which="SM", k=2 * num_neighs + 1)
+            if is_symmetric:
+                _, ev_max = spla.eigs(loc_A, k=1)
+                # See comment above on the number estimated here
+                _, ev_min = spla.eigs(loc_A, which="SM", k=2 * num_neighs + 1)
+
+            else:
+                _, ev_max, _ = spla.svds(loc_A, k=1)
+                # See comment above on the number estimated here
+                num_vec = 2 * num_neighs + 1
+                while True:
+                    if num_vec > 10 * num_neighs:
+                        raise ValueError("Arpack convergence issues")
+
+                    try:
+                        _, ev_min, _ = spla.svds(loc_A, which="SM", k=num_vec)
+                        break
+                    except spla.ArpackNoConvergence:
+                        num_vec += 2
+
             ev_max = np.real(ev_max)
             ev_min = np.real(ev_min)
             ev_max.sort()
