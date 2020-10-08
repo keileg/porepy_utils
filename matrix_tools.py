@@ -3,6 +3,57 @@ import scipy.sparse.linalg as spla
 from typing import Optional, List
 
 
+def condition_number(
+    A: "sps.spmatrix", est_zero_sv: Optional[int] = 10, tol: Optional[float] = 1e-10
+) -> float:
+    sz = A.shape[1]
+    skewness = A - A.T
+    is_symmetric = skewness.data.size == 0 or np.max(np.abs(skewness.data)) < tol
+    if sz == 1:
+        # Condition number of a scalar is 1
+        return 1
+    elif sz < 10000:
+        # For small problems, use dense singular value computation
+        if is_symmetric:
+            ev, _ = np.linalg.eig(A.toarray())
+        else:
+            _, ev, _ = np.linalg.svd(A.toarray())
+            ev.sort()
+        ev_max = ev
+        ev_min = ev
+    else:
+        # Find largest and smallest singular values
+        if is_symmetric:
+            ev_max, _ = spla.eigs(A, k=1)
+            # See comment above on the number estimated here
+            ev_min, _ = spla.eigs(A, which="SM", k=est_zero_sv + 1)
+
+        else:
+            _, ev_max, _ = spla.svds(A, k=1)
+            # See comment above on the number estimated here
+            num_vec = est_zero_sv + 1
+            while True:
+                if num_vec > 2 * est_zero_sv:
+                    raise ValueError("Arpack convergence issues")
+
+                try:
+                    _, ev_min, _ = spla.svds(A, which="SM", k=num_vec, ncv=3 * num_vec)
+                    break
+                except spla.ArpackNoConvergence:
+                    num_vec += 2
+
+        ev_max = np.real(ev_max)
+        ev_min = np.real(ev_min)
+        ev_max.sort()
+        ev_min.sort()
+
+    # Find the smallest eigenvalue / singular value which is significantly
+    # different from zero
+    first_nonzero = np.where(ev_min > ev_max[-1] * tol)[0][0]
+
+    return ev_max[-1] / ev_min[first_nonzero]
+
+
 def block_condition_numbers(
     assembler: "pp.Assembler", A: "sps.spmatrix", variables: Optional[List[str]] = None
 ) -> np.ndarray:
@@ -62,49 +113,9 @@ def block_condition_numbers(
 
         ind = assembler.dof_ind(g, var)
         loc_A = A[ind][:, ind]
-        is_symmetric = np.max(np.abs((A - A.T).data)) < tol
-        if ind.size == 1:
-            # Condition number of a scalar is 1
-            condition_numbers[block_ind] = 1
-            continue
-        elif ind.size < max(num_neighs + 2, 100):
-            # For small problems, use dense singular value computation
-            if is_symmetric:
-                _, ev = np.linalg.eig(loc_A.toarray())
-            else:
-                _, ev, _ = np.linalg.svd(loc_A.toarray())
-                ev.sort()
-            ev_max = ev
-            ev_min = ev
-        else:
-            # Find largest and smallest singular values
-            if is_symmetric:
-                _, ev_max = spla.eigs(loc_A, k=1)
-                # See comment above on the number estimated here
-                _, ev_min = spla.eigs(loc_A, which="SM", k=2 * num_neighs + 1)
 
-            else:
-                _, ev_max, _ = spla.svds(loc_A, k=1)
-                # See comment above on the number estimated here
-                num_vec = 2 * num_neighs + 1
-                while True:
-                    if num_vec > 10 * num_neighs:
-                        raise ValueError("Arpack convergence issues")
-
-                    try:
-                        _, ev_min, _ = spla.svds(loc_A, which="SM", k=num_vec)
-                        break
-                    except spla.ArpackNoConvergence:
-                        num_vec += 2
-
-            ev_max = np.real(ev_max)
-            ev_min = np.real(ev_min)
-            ev_max.sort()
-            ev_min.sort()
-
-        # Find the smallest eigenvalue / singular value which is significantly
-        # different from zero
-        first_nonzero = np.where(ev_min > ev_max[-1] * tol)[0][0]
-        condition_numbers[block_ind] = ev_max[-1] / ev_min[first_nonzero]
+        condition_numbers[block_ind] = condition_number(
+            loc_A, est_zero_sv=2 * num_neighs + 1
+        )
 
     return condition_numbers
